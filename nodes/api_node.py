@@ -50,16 +50,17 @@ class ConfigLoader:
 config_loader = ConfigLoader()
 
 class BaseFlux:
-    RETURN_TYPES = ("IMAGE",)
+    RETURN_TYPES = ("IMAGE", "STRING",)
+    RETURN_NAMES = ("IMAGE", "message",)
     FUNCTION = "generate_image"
     CATEGORY = "BFL"
 
     def process_result(self, result, output_format="jpeg"):
         try:
             sample_url = result['result']['sample']
-            img_response = requests.get(sample_url)
+            img_response = requests.get(sample_url, timeout=(10, 60))
             img = Image.open(io.BytesIO(img_response.content))
-            
+
             with io.BytesIO() as output:
                 img.save(output, format=output_format.upper())
                 output.seek(0)
@@ -67,13 +68,15 @@ class BaseFlux:
 
                 img_array = np.array(img_converted).astype(np.float32) / 255.0
                 img_tensor = torch.from_numpy(img_array)[None,]
-                return (img_tensor,)
+                return (img_tensor, "")
         except KeyError as e:
-            print(f"KeyError: Missing expected key {e}")
-            return self.create_blank_image()
+            msg = print(f"KeyError: Missing expected key {e}")
+            print(msg)
+            raise Exception(msg)
         except Exception as e:
-            print(f"Error processing image result: {str(e)}")
-            return self.create_blank_image()
+            msg = f"Error processing image result: {str(e)}"
+            print(msg)
+            raise Exception(msg)
 
     def create_blank_image(self):
         blank_img = Image.new('RGB', (512, 512), color='black')
@@ -85,22 +88,34 @@ class BaseFlux:
         if width % 32 != 0 or height % 32 != 0:
             raise ValueError(f"Width {width} and height {height} must be multiples of 32.")
 
-    def post_request(self, url_path, arguments):
+    def post_request(self, url_path, arguments, attempt=1, max_attempts=3):
         post_url = config_loader.create_url(url_path)
         headers = {"x-key": os.environ["X_KEY"]}
-        response = requests.post(post_url, json=arguments, headers=headers)
-        
-        if response.status_code == 200:
-            return response.json().get("id")
-        else:
-            print(f"Error initiating request: {response.status_code}, {response.text}")
-            return None
 
-    def get_result(self, task_id, output_format="jpeg", attempt=1, max_attempts=20):
+        try:
+            response = requests.post(post_url, json=arguments, headers=headers, timeout=30)
+            if response.status_code == 200:
+                return response.json().get("id")
+            else:
+                msg = f"Error initiating request: {response.status_code}, {response.text}"
+                print(msg)
+        except Exception as e:
+            msg = f"Response post request response: {str(e)}"
+            print(msg)
+
+        if attempt <= max_attempts:
+            time.sleep(5)
+            return self.post_request(url_path, arguments, attempt + 1, max_attempts)
+
+        msg += f"\nMax attempts {max_attempts}."
+        raise Exception(msg)
+
+    def get_result(self, task_id, output_format="jpeg", attempt=1, max_attempts=60):
         if attempt > max_attempts:
-            print(f"Max attempts reached for task_id {task_id}. Image not ready.")
-            return self.create_blank_image()
-        
+            msg = f"Max attempts reached for task_id {task_id}. Image not ready."
+            print(msg)
+            raise Exception(msg)
+
         get_url = config_loader.create_url(f"get_result?id={task_id}")
         headers = {"x-key": os.environ["X_KEY"]}
         result_response = requests.get(get_url, headers=headers)
@@ -116,15 +131,16 @@ class BaseFlux:
                     time.sleep(5)
                     return self.get_result(task_id, output_format, attempt + 1, max_attempts)
                 else:
-                    print(f"Error: Unexpected status '{status}'")
-                    return self.create_blank_image()
-            except ValueError as e:
+                    msg = f"Error: Unexpected status '{status}'"
+                    print(msg)
+                    return (self.create_blank_image(), msg)
+            except Exception as e:
                 print(f"Error parsing JSON response: {str(e)}")
                 print(f"Response content: {result_response.text}")
-                return self.create_blank_image()
-        else:
-            print(f"Error fetching result: {result_response.status_code}, {result_response.text}")
-            return self.create_blank_image()
+
+        print(f"Error fetching result: {result_response.status_code}, {result_response.text}")
+        time.sleep(5)
+        return self.get_result(task_id, output_format, attempt + 1, max_attempts)
 
     def generate_image(self, url_path, arguments):
         if "width" in arguments and "height" in arguments:
@@ -132,13 +148,15 @@ class BaseFlux:
 
         try:
             task_id = self.post_request(url_path, arguments)
+            msg = f"Task ID '{task_id}'"
             if task_id:
-                print(f"Task ID '{task_id}'")
+                print(msg)
                 return self.get_result(task_id, output_format=arguments.get("output_format", "jpeg"))
-            return self.create_blank_image()
+            return (self.create_blank_image(), msg)
         except Exception as e:
-            print(f"Error generating image: {str(e)}")
-            return self.create_blank_image()
+            msg = f"Error generating image: {str(e)}"
+            print(msg)
+            return (self.create_blank_image(), msg)
 
 
 class FluxPro11(BaseFlux):
